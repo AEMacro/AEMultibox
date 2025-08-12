@@ -208,24 +208,65 @@ PerformUpdate(downloadUrl) {
         
         ; Create batch file for replacement
         batchPath := A_Temp . "\update_ae_multibox.bat"
+        
+        ; Get the current PID for checking
+        currentPID := ProcessExist()
+        
         batchContent := "@echo off`r`n"
-        batchContent .= "echo Waiting for application to close...`r`n"
-        batchContent .= "timeout /t 2 /nobreak > nul`r`n"  ; Wait for app to close
+        batchContent .= "chcp 65001 > nul`r`n"  ; UTF-8 support
+        batchContent .= "echo Waiting for application to close (PID: " . currentPID . ")...`r`n"
+        batchContent .= "timeout /t 3 /nobreak > nul`r`n"  ; Initial wait
+        
+        ; More robust process checking
         batchContent .= ":waitloop`r`n"
-        batchContent .= 'tasklist /FI "PID eq ' . ProcessExist() . '" 2>NUL | find /I /N "' . (IS_COMPILED ? A_ScriptName : "AutoHotkey") . '">NUL`r`n'
+        batchContent .= 'tasklist /FI "PID eq ' . currentPID . '" 2>NUL | find "' . currentPID . '" >NUL`r`n'
         batchContent .= 'if "%ERRORLEVEL%"=="0" (`r`n'
+        batchContent .= "    echo Process still running, waiting...`r`n"
         batchContent .= "    timeout /t 1 /nobreak > nul`r`n"
         batchContent .= "    goto waitloop`r`n"
         batchContent .= ")`r`n"
+        batchContent .= "`r`n"
+        
+        ; Additional safety wait
+        batchContent .= "echo Process closed. Waiting additional 2 seconds for file release...`r`n"
+        batchContent .= "timeout /t 2 /nobreak > nul`r`n"
+        batchContent .= "`r`n"
+        
+        ; Check if old file still exists and is locked
+        batchContent .= ":checklock`r`n"
+        batchContent .= 'if exist "' . A_ScriptFullPath . '" (`r`n'
+        batchContent .= '    2>nul (>>"' . A_ScriptFullPath . '" echo off) && (`r`n'
+        batchContent .= "        echo File is unlocked, proceeding with update...`r`n"
+        batchContent .= "    ) || (`r`n"
+        batchContent .= "        echo File is still locked, waiting...`r`n"
+        batchContent .= "        timeout /t 1 /nobreak > nul`r`n"
+        batchContent .= "        goto checklock`r`n"
+        batchContent .= "    )`r`n"
+        batchContent .= ")`r`n"
+        batchContent .= "`r`n"
+        
+        ; Delete old file first, then move new one
         batchContent .= "echo Updating application...`r`n"
+        batchContent .= 'if exist "' . A_ScriptFullPath . '" del /f /q "' . A_ScriptFullPath . '"`r`n'
+        batchContent .= "timeout /t 1 /nobreak > nul`r`n"
         batchContent .= 'move /y "' . tempPath . '" "' . A_ScriptFullPath . '"`r`n'
-        batchContent .= "if %ERRORLEVEL% neq 0 (`r`n"
+        batchContent .= "`r`n"
+        
+        ; Error checking
+        batchContent .= 'if not exist "' . A_ScriptFullPath . '" (`r`n'
         batchContent .= "    echo ERROR: Failed to update file. Restoring backup...`r`n"
-        batchContent .= '    move /y "' . backupPath . '" "' . A_ScriptFullPath . '"`r`n'
-        batchContent .= "    pause`r`n"
+        batchContent .= '    if exist "' . backupPath . '" (`r`n'
+        batchContent .= '        move /y "' . backupPath . '" "' . A_ScriptFullPath . '"`r`n'
+        batchContent .= "    )`r`n"
+        batchContent .= "    echo Update failed! Press any key to exit...`r`n"
+        batchContent .= "    pause > nul`r`n"
         batchContent .= "    exit /b 1`r`n"
         batchContent .= ")`r`n"
+        batchContent .= "`r`n"
+        
+        ; Start updated application
         batchContent .= "echo Starting updated application...`r`n"
+        batchContent .= "timeout /t 1 /nobreak > nul`r`n"
         
         if (IS_COMPILED) {
             batchContent .= 'start "" "' . A_ScriptFullPath . '"`r`n'
@@ -233,9 +274,11 @@ PerformUpdate(downloadUrl) {
             batchContent .= 'start "" "' . A_AhkPath . '" "' . A_ScriptFullPath . '"`r`n'
         }
         
+        batchContent .= "`r`n"
         batchContent .= "echo Cleaning up...`r`n"
-        batchContent .= 'del "' . backupPath . '"`r`n'
-        batchContent .= 'del "%~f0"`r`n'  ; Delete the batch file itself
+        batchContent .= 'if exist "' . backupPath . '" del /f /q "' . backupPath . '"`r`n'
+        batchContent .= 'timeout /t 2 /nobreak > nul`r`n'
+        batchContent .= 'del /f /q "%~f0"`r`n'  ; Delete the batch file itself
         
         FileAppend(batchContent, batchPath)
         progressBar.Value := 100
@@ -244,8 +287,40 @@ PerformUpdate(downloadUrl) {
         Sleep(500)
         progress.Destroy()
         
-        ; Run batch file and exit
-        Run(batchPath, , "Hide")
+        ; Run batch file with elevated permissions if needed
+        try {
+            if (A_IsAdmin) {
+                Run('*RunAs "' . batchPath . '"', , "Hide")
+            } else {
+                Run(batchPath, , "Hide")
+            }
+        } catch {
+            ; If batch fails, try PowerShell approach
+            psPath := A_Temp . "\update_ae_multibox.ps1"
+            psContent := '$pid = ' . ProcessExist() . '`r`n'
+            psContent .= 'Write-Host "Waiting for process to exit..."`r`n'
+            psContent .= 'while (Get-Process -Id $pid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }`r`n'
+            psContent .= 'Start-Sleep -Seconds 2`r`n'
+            psContent .= 'Write-Host "Updating file..."`r`n'
+            psContent .= 'Move-Item -Path "' . tempPath . '" -Destination "' . A_ScriptFullPath . '" -Force`r`n'
+            psContent .= 'Start-Sleep -Seconds 1`r`n'
+            psContent .= 'Write-Host "Starting updated application..."`r`n'
+            
+            if (IS_COMPILED) {
+                psContent .= 'Start-Process "' . A_ScriptFullPath . '"`r`n'
+            } else {
+                psContent .= 'Start-Process "' . A_AhkPath . '" -ArgumentList "' . A_ScriptFullPath . '"`r`n'
+            }
+            
+            psContent .= 'Remove-Item "' . backupPath . '" -Force -ErrorAction SilentlyContinue`r`n'
+            psContent .= 'Remove-Item $PSCommandPath -Force`r`n'
+            
+            FileAppend(psContent, psPath)
+            Run('powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "' . psPath . '"', , "Hide")
+        }
+        
+        ; Give a moment for the batch/PS to start
+        Sleep(100)
         ExitApp
         
     } catch as err {

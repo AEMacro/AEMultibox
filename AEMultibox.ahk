@@ -2,28 +2,9 @@
 #SingleInstance Force
 
 ; ================================
-; Version and Update Configuration
-; ================================
-global SCRIPT_VERSION := "1.0.1"  ; INCREMENT THIS WITH EACH RELEASE
-global UPDATE_CHECK_URL := "https://api.github.com/repos/AEMacro/AEMultibox/releases/latest"
-global MANUAL_CHECK_URL := "https://github.com/AEMacro/AEMultibox/releases/latest"
-global UPDATE_CHECK_ON_START := true
-global UPDATE_CHECK_INTERVAL := 3600000  ; Check every hour (in milliseconds)
-
-; Determine if running as compiled EXE or script
-global IS_COMPILED := A_IsCompiled
-global FILE_EXTENSION := IS_COMPILED ? ".exe" : ".ahk"
-
-; ================================
 ; Admin / startup
 ; ================================
 global USE_MEMORY_READING := true
-
-; Check for updates before anything else (if enabled)
-if (UPDATE_CHECK_ON_START) {
-    CheckForUpdates(false)  ; false = automatic check (silent if no update)
-}
-
 if !A_IsAdmin {
     result := MsgBox(
         "This script works best with administrator privileges to read game memory for accurate combat detection.`n`n" .
@@ -32,11 +13,7 @@ if !A_IsAdmin {
         "Admin Recommended", 0x34)
     if (result == "Yes") {
         try {
-            if (IS_COMPILED) {
-                Run '*RunAs "' . A_ScriptFullPath . '"'
-            } else {
-                Run '*RunAs "' . A_AhkPath . '" /restart "' . A_ScriptFullPath . '"'
-            }
+            Run '*RunAs "' . A_AhkPath . '" /restart "' . A_ScriptFullPath . '"'
         } catch {
             MsgBox("Failed to elevate. Falling back to cursor color detection.", "Notice", 0x30)
             USE_MEMORY_READING := false
@@ -91,315 +68,9 @@ global lastWindow2Status := ""
 global lastChatStatus := ""
 
 ; ================================
-; Auto-Update Functions
-; ================================
-CheckForUpdates(isManual := true) {
-    global SCRIPT_VERSION, UPDATE_CHECK_URL, MANUAL_CHECK_URL, IS_COMPILED, FILE_EXTENSION
-    
-    ; Create a temporary file for the response
-    tempFile := A_Temp . "\ae_update_check.json"
-    
-    try {
-        ; Download the release info
-        Download(UPDATE_CHECK_URL, tempFile)
-        
-        ; Read the JSON response
-        jsonText := FileRead(tempFile)
-        
-        ; Parse version from tag_name (assumes format like "v1.0.0")
-        if (RegExMatch(jsonText, '"tag_name"\s*:\s*"v?([^"]+)"', &match)) {
-            latestVersion := match[1]
-            
-            ; Compare versions
-            if (CompareVersions(latestVersion, SCRIPT_VERSION) > 0) {
-                ; Parse download URL based on file type
-                downloadUrl := ""
-                searchPattern := IS_COMPILED ? '"browser_download_url"\s*:\s*"([^"]+\.exe)"' : '"browser_download_url"\s*:\s*"([^"]+\.ahk)"'
-                
-                if (RegExMatch(jsonText, searchPattern, &urlMatch)) {
-                    downloadUrl := urlMatch[1]
-                }
-                
-                ; Parse release notes
-                releaseNotes := ""
-                if (RegExMatch(jsonText, '"body"\s*:\s*"([^"]*)"', &notesMatch)) {
-                    releaseNotes := StrReplace(notesMatch[1], "\r\n", "`n")
-                    releaseNotes := StrReplace(releaseNotes, "\n", "`n")
-                }
-                
-                ; Show update dialog
-                message := "A new version is available!`n`n"
-                message .= "Current Version: " . SCRIPT_VERSION . "`n"
-                message .= "Latest Version: " . latestVersion . "`n`n"
-                
-                if (releaseNotes != "") {
-                    message .= "Release Notes:`n" . releaseNotes . "`n`n"
-                }
-                
-                message .= "Would you like to update now?"
-                
-                result := MsgBox(message, "Update Available", 0x34)
-                
-                if (result == "Yes") {
-                    if (downloadUrl != "") {
-                        PerformUpdate(downloadUrl)
-                    } else {
-                        ; Fallback to manual download
-                        fileType := IS_COMPILED ? "EXE" : "AHK"
-                        MsgBox("Automatic download URL not found for " . fileType . " file. Opening release page...", "Update", 0x40)
-                        Run(MANUAL_CHECK_URL)
-                    }
-                }
-            } else if (isManual) {
-                MsgBox("You are running the latest version (" . SCRIPT_VERSION . ")", "No Updates", 0x40)
-            }
-        } else if (isManual) {
-            MsgBox("Could not parse version information from GitHub.", "Update Check Failed", 0x30)
-        }
-        
-    } catch as err {
-        if (isManual) {
-            MsgBox("Failed to check for updates: " . err.Message . "`n`nPlease check your internet connection or try again later.", "Update Check Failed", 0x30)
-        }
-    } finally {
-        ; Clean up temp file
-        try FileDelete(tempFile)
-    }
-}
-
-PerformUpdate(downloadUrl) {
-    global IS_COMPILED
-    
-    ; Create backup of current file
-    backupPath := A_ScriptFullPath . ".backup"
-    tempPath := A_ScriptFullPath . ".new"
-    
-    try {
-        ; Show progress
-        progress := Gui("+AlwaysOnTop -MinimizeBox", "Updating...")
-        progress.Add("Text", "w300 Center", "Downloading update...")
-        progressBar := progress.Add("Progress", "w300 h20 Range0-100", 0)
-        statusText := progress.Add("Text", "w300 Center", "")
-        progress.Show()
-        
-        ; Backup current file
-        statusText.Text := "Creating backup..."
-        FileCopy(A_ScriptFullPath, backupPath, 1)
-        progressBar.Value := 20
-        
-        ; Download new version
-        statusText.Text := "Downloading new version..."
-        Download(downloadUrl, tempPath)
-        progressBar.Value := 60
-        
-        ; Verify download
-        if (!FileExist(tempPath)) {
-            throw Error("Download failed - file not found")
-        }
-        
-        ; Check if downloaded file is valid (basic size check)
-        downloadedSize := FileGetSize(tempPath)
-        if (downloadedSize < 1000) {  ; Less than 1KB is probably an error
-            throw Error("Downloaded file appears to be invalid (too small)")
-        }
-        
-        progressBar.Value := 80
-        statusText.Text := "Preparing to restart..."
-        
-        ; Create batch file for replacement
-        batchPath := A_Temp . "\update_ae_multibox.bat"
-        
-        ; Get the current PID for checking
-        currentPID := ProcessExist()
-        
-        batchContent := "@echo off`r`n"
-        batchContent .= "chcp 65001 > nul`r`n"  ; UTF-8 support
-        batchContent .= "echo Waiting for application to close (PID: " . currentPID . ")...`r`n"
-        batchContent .= "timeout /t 3 /nobreak > nul`r`n"  ; Initial wait
-        
-        ; More robust process checking
-        batchContent .= ":waitloop`r`n"
-        batchContent .= 'tasklist /FI "PID eq ' . currentPID . '" 2>NUL | find "' . currentPID . '" >NUL`r`n'
-        batchContent .= 'if "%ERRORLEVEL%"=="0" (`r`n'
-        batchContent .= "    echo Process still running, waiting...`r`n"
-        batchContent .= "    timeout /t 1 /nobreak > nul`r`n"
-        batchContent .= "    goto waitloop`r`n"
-        batchContent .= ")`r`n"
-        batchContent .= "`r`n"
-        
-        ; Additional safety wait
-        batchContent .= "echo Process closed. Waiting additional 2 seconds for file release...`r`n"
-        batchContent .= "timeout /t 2 /nobreak > nul`r`n"
-        batchContent .= "`r`n"
-        
-        ; Check if old file still exists and is locked
-        batchContent .= ":checklock`r`n"
-        batchContent .= 'if exist "' . A_ScriptFullPath . '" (`r`n'
-        batchContent .= '    2>nul (>>"' . A_ScriptFullPath . '" echo off) && (`r`n'
-        batchContent .= "        echo File is unlocked, proceeding with update...`r`n"
-        batchContent .= "    ) || (`r`n"
-        batchContent .= "        echo File is still locked, waiting...`r`n"
-        batchContent .= "        timeout /t 1 /nobreak > nul`r`n"
-        batchContent .= "        goto checklock`r`n"
-        batchContent .= "    )`r`n"
-        batchContent .= ")`r`n"
-        batchContent .= "`r`n"
-        
-        ; Delete old file first, then move new one
-        batchContent .= "echo Updating application...`r`n"
-        batchContent .= 'if exist "' . A_ScriptFullPath . '" del /f /q "' . A_ScriptFullPath . '"`r`n'
-        batchContent .= "timeout /t 1 /nobreak > nul`r`n"
-        batchContent .= 'move /y "' . tempPath . '" "' . A_ScriptFullPath . '"`r`n'
-        batchContent .= "`r`n"
-        
-        ; Error checking
-        batchContent .= 'if not exist "' . A_ScriptFullPath . '" (`r`n'
-        batchContent .= "    echo ERROR: Failed to update file. Restoring backup...`r`n"
-        batchContent .= '    if exist "' . backupPath . '" (`r`n'
-        batchContent .= '        move /y "' . backupPath . '" "' . A_ScriptFullPath . '"`r`n'
-        batchContent .= "    )`r`n"
-        batchContent .= "    echo Update failed! Press any key to exit...`r`n"
-        batchContent .= "    pause > nul`r`n"
-        batchContent .= "    exit /b 1`r`n"
-        batchContent .= ")`r`n"
-        batchContent .= "`r`n"
-        
-        ; Start updated application
-        batchContent .= "echo Starting updated application...`r`n"
-        batchContent .= "timeout /t 1 /nobreak > nul`r`n"
-        
-        if (IS_COMPILED) {
-            batchContent .= 'start "" "' . A_ScriptFullPath . '"`r`n'
-        } else {
-            batchContent .= 'start "" "' . A_AhkPath . '" "' . A_ScriptFullPath . '"`r`n'
-        }
-        
-        batchContent .= "`r`n"
-        batchContent .= "echo Cleaning up...`r`n"
-        batchContent .= 'if exist "' . backupPath . '" del /f /q "' . backupPath . '"`r`n'
-        batchContent .= 'timeout /t 2 /nobreak > nul`r`n'
-        batchContent .= 'del /f /q "%~f0"`r`n'  ; Delete the batch file itself
-        
-        ; Write batch file
-        FileAppend(batchContent, batchPath)
-        
-        ; Also create a VBScript for more reliable file operations
-        vbsPath := A_Temp . "\update_ae_multibox.vbs"
-        vbsContent := 'Set objFSO = CreateObject("Scripting.FileSystemObject")' . "`r`n"
-        vbsContent .= 'Set objShell = CreateObject("WScript.Shell")' . "`r`n"
-        vbsContent .= 'WScript.Sleep 3000' . "`r`n"  ; Wait 3 seconds
-        vbsContent .= '' . "`r`n"
-        
-        ; Check if process is gone
-        vbsContent .= 'strComputer = "."' . "`r`n"
-        vbsContent .= 'Set objWMIService = GetObject("winmgmts:\\" & strComputer & "\root\cimv2")' . "`r`n"
-        vbsContent .= 'Set colProcesses = objWMIService.ExecQuery("Select * from Win32_Process Where ProcessId = ' . ProcessExist() . '")' . "`r`n"
-        vbsContent .= 'Do While colProcesses.Count > 0' . "`r`n"
-        vbsContent .= '    WScript.Sleep 500' . "`r`n"
-        vbsContent .= '    Set colProcesses = objWMIService.ExecQuery("Select * from Win32_Process Where ProcessId = ' . ProcessExist() . '")' . "`r`n"
-        vbsContent .= 'Loop' . "`r`n"
-        vbsContent .= '' . "`r`n"
-        
-        ; Additional wait
-        vbsContent .= 'WScript.Sleep 2000' . "`r`n"
-        vbsContent .= '' . "`r`n"
-        
-        ; Replace the file
-        vbsContent .= 'On Error Resume Next' . "`r`n"
-        vbsContent .= 'If objFSO.FileExists("' . StrReplace(A_ScriptFullPath, "\", "\\") . '") Then' . "`r`n"
-        vbsContent .= '    objFSO.DeleteFile "' . StrReplace(A_ScriptFullPath, "\", "\\") . '", True' . "`r`n"
-        vbsContent .= 'End If' . "`r`n"
-        vbsContent .= 'WScript.Sleep 500' . "`r`n"
-        vbsContent .= 'objFSO.MoveFile "' . StrReplace(tempPath, "\", "\\") . '", "' . StrReplace(A_ScriptFullPath, "\", "\\") . '"' . "`r`n"
-        vbsContent .= '' . "`r`n"
-        
-        ; Start the new version
-        vbsContent .= 'WScript.Sleep 1000' . "`r`n"
-        if (IS_COMPILED) {
-            vbsContent .= 'objShell.Run """' . StrReplace(A_ScriptFullPath, "\", "\\") . '"""' . "`r`n"
-        } else {
-            vbsContent .= 'objShell.Run """' . StrReplace(A_AhkPath, "\", "\\") . '""" ""' . StrReplace(A_ScriptFullPath, "\", "\\") . '"""' . "`r`n"
-        }
-        
-        ; Clean up
-        vbsContent .= 'If objFSO.FileExists("' . StrReplace(backupPath, "\", "\\") . '") Then' . "`r`n"
-        vbsContent .= '    objFSO.DeleteFile "' . StrReplace(backupPath, "\", "\\") . '", True' . "`r`n"
-        vbsContent .= 'End If' . "`r`n"
-        vbsContent .= 'WScript.Sleep 1000' . "`r`n"
-        vbsContent .= 'objFSO.DeleteFile WScript.ScriptFullName, True' . "`r`n"
-        
-        FileAppend(vbsContent, vbsPath)
-        
-        progressBar.Value := 100
-        statusText.Text := "Restarting application..."
-        
-        Sleep(500)
-        progress.Destroy()
-        
-        ; Try VBScript first, then batch as fallback
-        try {
-            Run('wscript.exe "' . vbsPath . '"', , "Hide")
-        } catch {
-            try {
-                Run(batchPath, , "Hide")
-            } catch {
-                ; Last resort: show manual instructions
-                MsgBox("Automatic update failed. The new version has been downloaded as:`n`n" . tempPath . 
-                      "`n`nPlease manually:`n1. Close this application`n2. Delete the old file`n3. Rename the .new file to remove '.new'`n4. Run the updated version", 
-                      "Manual Update Required", 0x30)
-                return
-            }
-        }
-        
-        ; Give a moment for the script to start
-        Sleep(100)
-        ExitApp
-        
-    } catch as err {
-        ; Restore backup if something went wrong
-        if (FileExist(backupPath)) {
-            try FileCopy(backupPath, A_ScriptFullPath, 1)
-        }
-        
-        MsgBox("Update failed: " . err.Message . "`n`nYour application has not been changed.", "Update Error", 0x30)
-        
-        ; Clean up
-        try FileDelete(tempPath)
-        try FileDelete(backupPath)
-        try progress.Destroy()
-    }
-}
-
-CompareVersions(version1, version2) {
-    ; Split versions into parts
-    v1Parts := StrSplit(version1, ".")
-    v2Parts := StrSplit(version2, ".")
-    
-    ; Pad with zeros if needed
-    maxParts := Max(v1Parts.Length, v2Parts.Length)
-    Loop (maxParts - v1Parts.Length)
-        v1Parts.Push(0)
-    Loop (maxParts - v2Parts.Length)
-        v2Parts.Push(0)
-    
-    ; Compare each part
-    Loop maxParts {
-        v1Num := Integer(v1Parts[A_Index])
-        v2Num := Integer(v2Parts[A_Index])
-        
-        if (v1Num > v2Num)
-            return 1
-        else if (v1Num < v2Num)
-            return -1
-    }
-    
-    return 0  ; Versions are equal
-}
-
-; ================================
 ; GUI
 ; ================================
-global MyGui := Gui(, "AE Multi-Window Tool v" . SCRIPT_VERSION . (IS_COMPILED ? " (EXE)" : ""))
+global MyGui := Gui(, "AE Multi-Window Tool")
 MyGui.Opt("+Resize -MaximizeBox +MinSize250x200")
 MyGui.SetFont("s10", "Segoe UI")
 MyGui.BackColor := "0xF0F0F0"
@@ -460,12 +131,6 @@ MyGui.Add("Text", "xs y+10 w330", "───────────────
 MyGui.Add("Text", "xs y+5", "Right Alt + Key:")
 MyGui.Add("Text", "xs+10 y+5 w310", "Hold Right Alt and press any key to send it to the other game window")
 
-MyGui.Add("Text", "xs y+10 w330", "─────────────────────────────")
-MyGui.Add("Text", "xs y+5", "Auto-Update:")
-UpdateButton := MyGui.Add("Button", "xs+10 y+5 w100", "Check Now")
-UpdateButton.OnEvent("Click", (*) => CheckForUpdates(true))
-MyGui.Add("Text", "xs+120 yp+5", "Version: " . SCRIPT_VERSION . (IS_COMPILED ? " (EXE)" : " (Script)"))
-
 ; Info tab
 Tab.UseTab(3)
 MyGui.SetFont("s8", "Segoe UI")
@@ -477,9 +142,6 @@ MyGui.Add("Text", "w330", "  (Default: Single=All, Double=Active)")
 MyGui.Add("Text", "w330", "• Right Alt + Any Key: Send to other window")
 MyGui.Add("Text", "w330", "• Enter: Toggle chat mode")
 MyGui.Add("Text", "w330", "• Esc: Exit chat mode & combat")
-MyGui.Add("Text", "w330", "")
-MyGui.Add("Text", "w330", "VERSION: " . SCRIPT_VERSION)
-MyGui.Add("Text", "w330", "TYPE: " . (IS_COMPILED ? "Compiled EXE" : "AutoHotkey Script"))
 
 ; Tab / Close handlers
 Tab.UseTab()
@@ -496,11 +158,6 @@ UpdateWindowCount()
 SetTimer(CheckCombatState, 150)
 SetTimer(UpdateChatDisplay, 100)
 
-; Set up periodic update checks
-if (UPDATE_CHECK_INTERVAL > 0) {
-    SetTimer(() => CheckForUpdates(false), UPDATE_CHECK_INTERVAL)
-}
-
 ; ================================
 ; Event Handlers / Helpers / Core
 ; ================================
@@ -509,7 +166,7 @@ OnTabChange(*) {
     currentTab := Tab.Value
     targetHeight := 340
     if (currentTab == 2)
-        targetHeight := 420  ; Increased for update button
+        targetHeight := 380
     MyGui.GetPos(&x, &y, &w, &h)
     if (h != targetHeight)
         MyGui.Move(, , , targetHeight)

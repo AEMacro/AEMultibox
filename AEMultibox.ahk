@@ -44,6 +44,7 @@ if !A_IsAdmin {
     } else {
         USE_MEMORY_READING := false
     }
+			}
 }
 
 SetTitleMatchMode(2)

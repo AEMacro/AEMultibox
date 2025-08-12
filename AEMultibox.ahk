@@ -4,7 +4,7 @@
 ; ================================
 ; Version and Update Configuration
 ; ================================
-global SCRIPT_VERSION := "1.0.1"  ; INCREMENT THIS WITH EACH RELEASE
+global SCRIPT_VERSION := "1.0.0"  ; INCREMENT THIS WITH EACH RELEASE
 global UPDATE_CHECK_URL := "https://api.github.com/repos/AEMacro/AEMultibox/releases/latest"
 global MANUAL_CHECK_URL := "https://github.com/AEMacro/AEMultibox/releases/latest"
 global UPDATE_CHECK_ON_START := true
@@ -40,7 +40,6 @@ if !A_IsAdmin {
         } catch {
             MsgBox("Failed to elevate. Falling back to cursor color detection.", "Notice", 0x30)
             USE_MEMORY_READING := false
-        }
         ExitApp
     } else {
         USE_MEMORY_READING := false

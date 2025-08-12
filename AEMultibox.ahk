@@ -40,11 +40,11 @@ if !A_IsAdmin {
         } catch {
             MsgBox("Failed to elevate. Falling back to cursor color detection.", "Notice", 0x30)
             USE_MEMORY_READING := false
+        }
         ExitApp
     } else {
         USE_MEMORY_READING := false
     }
-			}
 }
 
 SetTitleMatchMode(2)
@@ -280,46 +280,78 @@ PerformUpdate(downloadUrl) {
         batchContent .= 'timeout /t 2 /nobreak > nul`r`n'
         batchContent .= 'del /f /q "%~f0"`r`n'  ; Delete the batch file itself
         
+        ; Write batch file
         FileAppend(batchContent, batchPath)
+        
+        ; Also create a VBScript for more reliable file operations
+        vbsPath := A_Temp . "\update_ae_multibox.vbs"
+        vbsContent := 'Set objFSO = CreateObject("Scripting.FileSystemObject")' . "`r`n"
+        vbsContent .= 'Set objShell = CreateObject("WScript.Shell")' . "`r`n"
+        vbsContent .= 'WScript.Sleep 3000' . "`r`n"  ; Wait 3 seconds
+        vbsContent .= '' . "`r`n"
+        
+        ; Check if process is gone
+        vbsContent .= 'strComputer = "."' . "`r`n"
+        vbsContent .= 'Set objWMIService = GetObject("winmgmts:\\" & strComputer & "\root\cimv2")' . "`r`n"
+        vbsContent .= 'Set colProcesses = objWMIService.ExecQuery("Select * from Win32_Process Where ProcessId = ' . ProcessExist() . '")' . "`r`n"
+        vbsContent .= 'Do While colProcesses.Count > 0' . "`r`n"
+        vbsContent .= '    WScript.Sleep 500' . "`r`n"
+        vbsContent .= '    Set colProcesses = objWMIService.ExecQuery("Select * from Win32_Process Where ProcessId = ' . ProcessExist() . '")' . "`r`n"
+        vbsContent .= 'Loop' . "`r`n"
+        vbsContent .= '' . "`r`n"
+        
+        ; Additional wait
+        vbsContent .= 'WScript.Sleep 2000' . "`r`n"
+        vbsContent .= '' . "`r`n"
+        
+        ; Replace the file
+        vbsContent .= 'On Error Resume Next' . "`r`n"
+        vbsContent .= 'If objFSO.FileExists("' . StrReplace(A_ScriptFullPath, "\", "\\") . '") Then' . "`r`n"
+        vbsContent .= '    objFSO.DeleteFile "' . StrReplace(A_ScriptFullPath, "\", "\\") . '", True' . "`r`n"
+        vbsContent .= 'End If' . "`r`n"
+        vbsContent .= 'WScript.Sleep 500' . "`r`n"
+        vbsContent .= 'objFSO.MoveFile "' . StrReplace(tempPath, "\", "\\") . '", "' . StrReplace(A_ScriptFullPath, "\", "\\") . '"' . "`r`n"
+        vbsContent .= '' . "`r`n"
+        
+        ; Start the new version
+        vbsContent .= 'WScript.Sleep 1000' . "`r`n"
+        if (IS_COMPILED) {
+            vbsContent .= 'objShell.Run """' . StrReplace(A_ScriptFullPath, "\", "\\") . '"""' . "`r`n"
+        } else {
+            vbsContent .= 'objShell.Run """' . StrReplace(A_AhkPath, "\", "\\") . '""" ""' . StrReplace(A_ScriptFullPath, "\", "\\") . '"""' . "`r`n"
+        }
+        
+        ; Clean up
+        vbsContent .= 'If objFSO.FileExists("' . StrReplace(backupPath, "\", "\\") . '") Then' . "`r`n"
+        vbsContent .= '    objFSO.DeleteFile "' . StrReplace(backupPath, "\", "\\") . '", True' . "`r`n"
+        vbsContent .= 'End If' . "`r`n"
+        vbsContent .= 'WScript.Sleep 1000' . "`r`n"
+        vbsContent .= 'objFSO.DeleteFile WScript.ScriptFullName, True' . "`r`n"
+        
+        FileAppend(vbsContent, vbsPath)
+        
         progressBar.Value := 100
         statusText.Text := "Restarting application..."
         
         Sleep(500)
         progress.Destroy()
         
-        ; Run batch file with elevated permissions if needed
+        ; Try VBScript first, then batch as fallback
         try {
-            if (A_IsAdmin) {
-                Run('*RunAs "' . batchPath . '"', , "Hide")
-            } else {
-                Run(batchPath, , "Hide")
-            }
+            Run('wscript.exe "' . vbsPath . '"', , "Hide")
         } catch {
-            ; If batch fails, try PowerShell approach
-            psPath := A_Temp . "\update_ae_multibox.ps1"
-            psContent := '$pid = ' . ProcessExist() . '`r`n'
-            psContent .= 'Write-Host "Waiting for process to exit..."`r`n'
-            psContent .= 'while (Get-Process -Id $pid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }`r`n'
-            psContent .= 'Start-Sleep -Seconds 2`r`n'
-            psContent .= 'Write-Host "Updating file..."`r`n'
-            psContent .= 'Move-Item -Path "' . tempPath . '" -Destination "' . A_ScriptFullPath . '" -Force`r`n'
-            psContent .= 'Start-Sleep -Seconds 1`r`n'
-            psContent .= 'Write-Host "Starting updated application..."`r`n'
-            
-            if (IS_COMPILED) {
-                psContent .= 'Start-Process "' . A_ScriptFullPath . '"`r`n'
-            } else {
-                psContent .= 'Start-Process "' . A_AhkPath . '" -ArgumentList "' . A_ScriptFullPath . '"`r`n'
+            try {
+                Run(batchPath, , "Hide")
+            } catch {
+                ; Last resort: show manual instructions
+                MsgBox("Automatic update failed. The new version has been downloaded as:`n`n" . tempPath . 
+                      "`n`nPlease manually:`n1. Close this application`n2. Delete the old file`n3. Rename the .new file to remove '.new'`n4. Run the updated version", 
+                      "Manual Update Required", 0x30)
+                return
             }
-            
-            psContent .= 'Remove-Item "' . backupPath . '" -Force -ErrorAction SilentlyContinue`r`n'
-            psContent .= 'Remove-Item $PSCommandPath -Force`r`n'
-            
-            FileAppend(psContent, psPath)
-            Run('powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "' . psPath . '"', , "Hide")
         }
         
-        ; Give a moment for the batch/PS to start
+        ; Give a moment for the script to start
         Sleep(100)
         ExitApp
         
